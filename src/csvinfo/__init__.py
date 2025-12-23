@@ -15,6 +15,11 @@ class CSVTree:
             def __len__(self) -> int:
                 return len(self._content)
 
+            def get_content(self) -> bytes:
+                assert isinstance(self._content, bytes), \
+                    type(self._content)
+                return self._content
+
             def append_byte(self, byte) -> None:
                 assert isinstance(byte, int), type(byte)
                 assert 0 <= byte and byte < 256
@@ -192,7 +197,8 @@ class CSVTree:
         assert 0x27 == b"'"[0]
 
         # qc: quote character
-        qc = 0x22
+        qc = self._quote_character
+        assert qc in (0x22, 0x27), qc
 
 
         assert 0x2c == 44
@@ -204,7 +210,8 @@ class CSVTree:
         assert 0x09 == b'\t'[0]
 
         # dc: delimiter character
-        dc = 0x2c
+        dc = self._delimiter_character
+        assert dc in (0x2c, 0x09), dc
 
 
         assert 0x20 == 32
@@ -557,7 +564,7 @@ class CSVTree:
 
                 assert ab in (True, False), ab
                 if ab is True:
-                    assert cell.append_bytes(b) is None
+                    assert cell.append_byte(b) is None
                 del ab
 
                 assert cell.subsequent_delimiter_is_set() is False
@@ -678,26 +685,158 @@ class CSVTree:
         assert 0 < len(self), len(self)
     
         return None
-            
 
 
-    def __init__(self, csv_file_path):
-        self._csv_file_path = csv_file_path
-        self._rows = []
+    def __init__(
+        self,
+        csv_file_path,
+        quote_character     = 0x22,
+        delimiter_character = 0x2c,
+    ):
+        self._csv_file_path       = csv_file_path
+        self._quote_character     = quote_character
+        self._delimiter_character = delimiter_character
+        self._rows                = []
         self._parse_csv_file()
+
 
     def __len__(self) -> int:
         return len(self._rows)
 
 
-    def get_n_rows():
-        pass
+    def get_statistics(self) -> dict:
 
-    def get_newline_delimiter_counts():
-        pass
+        qc = self._quote_character
+        dc = self._delimiter_character
 
-    def get_n_cells_containing_newlines():
-        pass
+        assert 0x20 == ord(' ')
+        SP = 0x20
+
+        n_rows                          = len(self)
+        n_rows_ended_by_lf              = 0
+        n_rows_ended_by_crlf            = 0
+        n_rows_ended_by_eof             = 0
+        n_rows_with_leading_spaces      = 0
+        n_rows_with_trailing_spaces     = 0
+        n_cells                         = 0
+        n_unquoted_cells                = 0
+        n_quoted_cells                  = 0
+        n_cells_containing_a_quote_char = 0
+        n_cells_containing_a_lf         = 0
+        n_cells_containing_a_crlf       = 0
+        n_conventional_cell_delimiters  = 0
+        n_spaces_cell_delimiters        = 0
+        n_cells_in_row_max              = float('-inf')
+        n_cells_in_row_min              = float('inf')
+        first_rowidx_with_max_n_cells   = -1
+        first_rowidx_with_min_n_cells   = -1
+        n_quote_chars_inside_cells      = 0
+        n_lfs_inside_cells              = 0
+        n_crlfs_inside_cells            = 0
+
+        for i in range(n_rows):
+            row = self._get_row(i)
+
+            ne = row.get_newline_encoding()
+            if   b'\x0a'     == ne: n_rows_ended_by_lf   += 1
+            elif b'\x0d\x0a' == ne: n_rows_ended_by_crlf += 1
+            elif b''         == ne: n_rows_ended_by_eof  += 1
+            else                  : raise RuntimeError()
+            del ne
+
+            if row.leading_spaces_are_present():
+                n_rows_with_leading_spaces += 1
+
+            # sd: subsequent delimiter
+            sd = row.get_cell(-1).get_subsequent_delimiter()
+            assert 0x20 == b' '[0]
+            assert 0x20 == ord(' ')
+            if   0x20 == sd: n_rows_with_trailing_spaces += 1
+            elif   -1 == sd: pass
+            else           : raise RuntimeError()
+            del sd
+
+            n_cells += len(row)
+
+            if len(row) < n_cells_in_row_min:
+                n_cells_in_row_min = len(row)
+                first_rowidx_with_min_n_cells = i
+
+            if n_cells_in_row_max < len(row):
+                n_cells_in_row_max = len(row)
+                first_rowidx_with_max_n_cells = i
+
+            for j in range(len(row)):
+                cell = row.get_cell(j)
+
+                # iq: [cell] is quoted
+                iq = cell.isquoted()
+                if   iq is True : n_quoted_cells   += 1
+                elif iq is False: n_unquoted_cells += 1
+                else            : raise RuntimeError()
+                del iq
+
+                # cc: cell content
+                cc = cell.get_content()
+                assert isinstance(cc, bytes), type(cc)
+                if bytes([qc]) in cc:
+                    n_cells_containing_a_quote_char += 1
+
+                n_quote_chars_inside_cells += cc.count(bytes([qc]))
+
+                n_crlfs = cc.count(b'\x0d\x0a')
+                n_lfs = cc.count(b'\x0a') - n_crlfs
+
+                if 0 < n_crlfs: n_cells_containing_a_crlf += 1
+                if 0 < n_lfs  : n_cells_containing_a_lf   += 1
+
+                n_crlfs_inside_cells += n_crlfs
+                n_lfs_inside_cells   += n_lfs
+
+                del n_crlfs, n_lfs
+                del cc
+
+
+                # fc: [is] final cell
+                if   j+1 <  len(row): fc = False
+                elif j+1 == len(row): fc = True
+                else                : raise RuntimeError()
+
+                # sd: subsequent delimiter
+                sd = cell.get_subsequent_delimiter()
+                if   fc is False: assert sd in (dc, SP), sd
+                elif fc is True : assert sd in (-1, SP), sd
+                else            : raise RuntimeError()
+
+                if   (fc is False) and (dc == sd): n_conventional_cell_delimiters += 1
+                elif (fc is False) and (SP == sd): n_spaces_cell_delimiters       += 1
+                del fc, sd
+
+        return \
+            {
+                'n_rows'                         : n_rows, 
+                'n_rows_ended_by_lf'             : n_rows_ended_by_lf,
+                'n_rows_ended_by_crlf'           : n_rows_ended_by_crlf,
+                'n_rows_ended_by_eof'            : n_rows_ended_by_eof,
+                'n_rows_with_leading_spaces'     : n_rows_with_leading_spaces,
+                'n_rows_with_trailing_spaces'    : n_rows_with_trailing_spaces,
+                'n_cells'                        : n_cells,
+                'n_unquoted_cells'               : n_unquoted_cells,
+                'n_quoted_cells'                 : n_quoted_cells,
+                'n_cells_containing_a_quote_char': n_cells_containing_a_quote_char,
+                'n_cells_containing_a_lf'        : n_cells_containing_a_lf,
+                'n_cells_containing_a_crlf'      : n_cells_containing_a_crlf,
+                'n_conventional_cell_delimiters' : n_conventional_cell_delimiters,
+                'n_spaces_cell_delimiters'       : n_spaces_cell_delimiters,
+                'n_cells_in_row_max'             : n_cells_in_row_max,
+                'n_cells_in_row_rounded_mean'    : round(n_cells / n_rows),
+                'n_cells_in_row_min'             : n_cells_in_row_min,
+                'first_rowidx_with_max_n_cells'  : first_rowidx_with_max_n_cells,
+                'first_rowidx_with_min_n_cells'  : first_rowidx_with_min_n_cells,
+                'n_quote_chars_inside_cells'     : n_quote_chars_inside_cells,
+                'n_lfs_inside_cells'             : n_lfs_inside_cells,
+                'n_crlfs_inside_cells'           : n_crlfs_inside_cells,
+            }
 
 
 
